@@ -1,1 +1,79 @@
-1
+name: Публикация сайта
+on:
+  push:
+    paths: ['site.zip', 'test.zip', '*.txt', '.github/workflows/publish.yml']
+  workflow_dispatch:
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+concurrency:
+  group: pages
+  cancel-in-progress: true
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Распаковать архив
+        run: |
+          Z=$(ls site.zip test.zip 2>/dev/null | head -1)
+          mkdir -p _tmp _site
+          unzip -q "$Z" -d _tmp
+          if [ -f _tmp/index.html ]; then cp -r _tmp/. _site/; else cp -r _tmp/*/. _site/; fi
+          touch _site/.nojekyll
+      - name: Подставить настройки из НАСТРОЙКИ.txt
+        shell: python
+        run: |
+          import pathlib, re, hashlib
+          vals = {}
+          for f in pathlib.Path('.').glob('*.txt'):
+              for line in f.read_text(encoding='utf-8-sig').splitlines():
+                  line = line.strip()
+                  if not line or line.startswith('#') or '=' not in line:
+                      continue
+                  k, v = line.split('=', 1)
+                  vals[k.strip().upper()] = v.strip()
+          def clean(k, v):
+              if k == 'METRIKA':
+                  return v if re.fullmatch(r'\d{4,12}', v) else ''
+              if k.startswith('PAYLINK') or k in ('SITE', 'STATS'):
+                  v = re.sub(r'[^A-Za-z0-9:/?&=._~%#+\-]', '', v).rstrip('/')
+                  if v and not v.startswith('http'):
+                      v = 'https://' + v
+                  return v
+              return re.sub(r'[<>"\'\\`]', '', v)[:120]
+          keys = ['METRIKA', 'STATS', 'PAYLINK', 'PAYLINK_PARENTS', 'PAYLINK_PEN', 'SITE', 'MAIL', 'OWNER', 'INN']
+          vals = {k: clean(k, vals.get(k, '')) for k in keys}
+          for k in keys:
+              print(k, '=', vals[k] if vals[k] else '(пусто)')
+          stamp = hashlib.sha1(repr(sorted(vals.items())).encode()).hexdigest()[:8]
+          for p in pathlib.Path('_site').rglob('*'):
+              if p.suffix not in ('.html', '.js'):
+                  continue
+              s = p.read_text(encoding='utf-8')
+              t = s
+              for k in keys:
+                  t = t.replace('@@' + k + '@@', vals[k])
+              if p.name == 'sw.js':
+                  t = re.sub(r"const V='([^']*)'", lambda m: "const V='" + m.group(1) + '-' + stamp + "'", t)
+              if t != s:
+                  p.write_text(t, encoding='utf-8')
+      - name: Сохранить готовый сайт в ветку site (для хостинга Timeweb)
+        run: |
+          cd _site
+          git init -q -b site
+          git config user.name "publish-bot"
+          git config user.email "publish-bot@users.noreply.github.com"
+          git add -A
+          git commit -qm "Готовый сайт"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" site
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deploy
+        uses: actions/deploy-pages@v4
